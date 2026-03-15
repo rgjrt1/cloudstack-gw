@@ -574,47 +574,11 @@ _PLUGIN_JS_TMPL = """\
     if (p) _show(p); else _hide();
   }
   window.addEventListener('hashchange', _onHash);
+  window.addEventListener('popstate', _onHash);
+  /* Vue Router 4 sometimes navigates via history.pushState without firing
+   * hashchange or popstate. Poll every 300 ms to keep overlay in sync.  */
+  setInterval(function() { if (_ov.style.display !== 'none') _onHash(); }, 300);
   _onHash();
-  /* Sidebar nav injection */
-  var _navBlock = null;
-  function _injectNav() {
-    var sider = document.querySelector('.ant-layout-sider-children');
-    if (!sider) return;
-    if (_navBlock && sider.contains(_navBlock)) { _updNav(); return; }
-    var old = document.getElementById('gw-nav-plugins');
-    if (old) old.remove();
-    _navBlock = document.createElement('div');
-    _navBlock.id = 'gw-nav-plugins';
-    _navBlock.style.cssText = 'border-top:1px solid rgba(0,0,0,.06);margin-top:4px;padding-top:4px;';
-    PLUGINS.forEach(function(plugin) {
-      var li = document.createElement('div');
-      li.className = 'ant-menu-item';
-      li.setAttribute('data-gw-ph', plugin.hash);
-      li.setAttribute('role', 'menuitem');
-      li.style.cssText = 'padding-left:24px;display:flex;align-items:center;'
-        + 'gap:10px;height:40px;line-height:40px;cursor:pointer;overflow:hidden;white-space:nowrap;';
-      li.innerHTML = '<span class="anticon" style="font-size:14px;flex-shrink:0;line-height:1;">' + plugin.icon + '</span>'
-        + '<span style="overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;">' + _E(plugin.label) + '</span>';
-      li.addEventListener('click', function(e) {
-        e.stopPropagation(); window.location.hash = plugin.hash;
-      });
-      _navBlock.appendChild(li);
-    });
-    sider.appendChild(_navBlock);
-    _updNav();
-  }
-  var _obs = new MutationObserver(function(muts) {
-    var ok = muts.some(function(m) {
-      return m.target !== _navBlock && !(_navBlock && _navBlock.contains(m.target));
-    });
-    if (ok) setTimeout(_injectNav, 50);
-  });
-  _obs.observe(document.body, {childList: true, subtree: true});
-  function _waitInject() {
-    if (document.querySelector('.ant-layout-sider-children')) _injectNav();
-    else setTimeout(_waitInject, 200);
-  }
-  _waitInject();
   new MutationObserver(function() { if (_ov.style.display !== 'none') _syncLeft(); })
     .observe(document.body, {attributes: true, attributeFilter: ['class'], subtree: true});
   /* Fetch + table renderer for api_src plugins */
@@ -1016,9 +980,6 @@ html {{ scroll-padding-top: 64px; }}
     var sel  = document.getElementById('gw-proj-sel');
     var wrap = document.getElementById('gw-proj-wrap');
     if (!sel) return;
-    if (!('listProjects' in (_store.getters.apis || {{}}))) {{
-      wrap.style.display = 'none'; return;
-    }}
     var _projects = [];
     /* Keep <select> in sync when other SPA code changes the project */
     _store.watch(function(s, g) {{ return g.project && g.project.id; }},
@@ -1082,6 +1043,24 @@ html {{ scroll-padding-top: 64px; }}
 
   /* 1c. User info + dropdown */
   function _initUser() {{
+    /* ── Plugin shortcuts in user drop-down ── */
+    var _dp = document.getElementById('gw-user-drop');
+    var _pr = document.getElementById('gw-mi-profile');
+    if (PLUGINS.length && _dp && _pr) {{
+      PLUGINS.forEach(function(pg) {{
+        var it = document.createElement('div');
+        it.className = 'gw-di';
+        it.innerHTML = '<span style="margin-right:6px;line-height:1;">' + pg.icon
+          + '</span>' + _E(pg.label);
+        it.addEventListener('click', function() {{
+          _closeDrops(); window.location.hash = pg.hash;
+        }});
+        _dp.insertBefore(it, _pr);
+      }});
+      var _sep = document.createElement('div');
+      _sep.className = 'gw-dsep';
+      _dp.insertBefore(_sep, _pr);
+    }}
     var info     = _store.getters.userInfo || {{}};
     var avatarEl = document.getElementById('gw-avatar');
     var nameEl   = document.getElementById('gw-username');
