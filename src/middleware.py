@@ -558,7 +558,7 @@ _PLUGIN_JS_TMPL = """\
       _ov.innerHTML = '<iframe src="' + _E(plugin.iframe_src)
         + '" style="position:absolute;top:0;left:0;width:100%;height:100%;border:none;"></iframe>';
     } else if (plugin.api_src) {
-      _ov.innerHTML = '<div style="max-width:1100px;margin:0 auto;padding:24px 24px 48px;">'
+      _ov.innerHTML = '<div style="max-width:1100px;padding:24px 40px 48px 24px;">'
         + '<h2 style="font-size:20px;font-weight:600;margin-bottom:16px;">' + _E(plugin.label) + '</h2>'
         + '<div id="gw-plugin-body"><span class="gw-spin"></span></div></div>';
       _fetchTable(plugin.api_src, document.getElementById('gw-plugin-body'));
@@ -591,10 +591,10 @@ _PLUGIN_JS_TMPL = """\
       li.className = 'ant-menu-item';
       li.setAttribute('data-gw-ph', plugin.hash);
       li.setAttribute('role', 'menuitem');
-      li.style.cssText = 'padding-left:24px!important;display:flex;align-items:center;'
-        + 'gap:8px;height:40px;line-height:40px;cursor:pointer;overflow:hidden;white-space:nowrap;';
-      li.innerHTML = '<span style="font-size:16px;flex-shrink:0;">' + _E(plugin.icon) + '</span>'
-        + '<span style="overflow:hidden;text-overflow:ellipsis;">' + _E(plugin.label) + '</span>';
+      li.style.cssText = 'padding-left:24px;display:flex;align-items:center;'
+        + 'gap:10px;height:40px;line-height:40px;cursor:pointer;overflow:hidden;white-space:nowrap;';
+      li.innerHTML = '<span class="anticon" style="font-size:14px;flex-shrink:0;line-height:1;">' + plugin.icon + '</span>'
+        + '<span style="overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;">' + _E(plugin.label) + '</span>';
       li.addEventListener('click', function(e) {
         e.stopPropagation(); window.location.hash = plugin.hash;
       });
@@ -693,6 +693,24 @@ _PLUGIN_JS_TMPL = """\
   }
 })();
 </script>"""
+
+# Map of named icon identifiers → Ant Design-style inline SVG (monochrome, currentColor).
+# Plugins specify icon names in config.yaml; this map resolves them to SVG strings that
+# are safe to inject as innerHTML (controls the icon span in the sidebar nav item).
+_ICON_SVG_MAP: dict[str, str] = {
+    "table": (
+        '<svg viewBox="64 64 896 896" width="1em" height="1em"'
+        ' fill="currentColor" aria-hidden="true">'
+        '<path d="M428 480H152c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h276c4.4 0 8-3.6'
+        ' 8-8v-56c0-4.4-3.6-8-8-8zm0-192H152c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8'
+        ' 8h276c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm308 0H560c-4.4 0-8 3.6-8 8v56'
+        'c0 4.4 3.6 8 8 8h176c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 192H560c-4.4'
+        ' 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h176c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8z'
+        'M832 64H192c-17.7 0-32 14.3-32 32v832c0 17.7 14.3 32 32 32h640c17.7 0 32-14.3'
+        ' 32-32V96c0-17.7-14.3-32-32-32zm-40 824H232V688h560v200zm0-264H232V424h560v200'
+        'zm0-264H232V136h560v200z"/></svg>'
+    ),
+}
 
 
 def _inject_footer(html_bytes: bytes, identity: "OidcIdentity", provisioned: "ProvisionedUser | None" = None, ui_config: "UiConfig | None" = None) -> bytes:
@@ -1269,7 +1287,7 @@ html {{ scroll-padding-top: 64px; }}
                 {
                     "id": p.id,
                     "label": p.label,
-                    "icon": p.icon,
+                    "icon": _ICON_SVG_MAP.get(p.icon, p.icon),
                     "hash": p.hash or f"#/gw-{p.id}",
                     "iframe_src": p.iframe_src,
                     "html": p.html,
@@ -2019,15 +2037,21 @@ def build_app(
                         status_code=403,
                     )
 
-        # 5b. Intercept listProjects for admin users.
-        #     Admin CS accounts are placed in the /oidc sub-domain, so CloudStack
-        #     scopes listProjects to that domain and returns an empty list even for
-        #     users with domain-admin grants over other domains.  Use the proxy's
-        #     own admin credentials (which have full cross-domain visibility) to
-        #     answer the call directly.  Domain-admin and root-admin both qualify.
-        if _cmd == "listProjects" and provisioned.is_admin:
+        # 5b. Intercept listProjects: reply via the proxy's admin client so the
+        #     project selector always reflects the user's actual access, regardless
+        #     of which domain their CS account is placed in.
+        #     Admins (root or domain): return all projects globally.
+        #     Project-only users: return only projects they are a member of.
+        if _cmd == "listProjects":
             try:
-                _all_proj = await cs_client.list_projects()
+                if provisioned.is_admin:
+                    _all_proj = await cs_client.list_projects()
+                elif provisioned.project_ids:
+                    _all_proj = []
+                    for _pid in set(provisioned.project_ids.values()):
+                        _all_proj.extend(await cs_client.list_projects(id=_pid))
+                else:
+                    _all_proj = []
                 return JSONResponse({
                     "listprojectsresponse": {
                         "count": len(_all_proj),
@@ -2036,7 +2060,7 @@ def build_app(
                 })
             except Exception as _proj_exc:
                 logger.warning(
-                    "Admin listProjects intercept failed (%s) — falling through to upstream",
+                    "listProjects intercept failed (%s) — falling through to upstream",
                     _proj_exc,
                 )
 

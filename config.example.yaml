@@ -123,16 +123,19 @@ ui:
   plugins:
     - id: access-map
       label: "Access Map"
-      icon: "🗂️"
+      # Named icons render as monochrome Ant Design SVGs matching the CS sidebar style.
+      # Supported values: "table"  (more can be added to _ICON_SVG_MAP in middleware.py)
+      # Raw SVG strings (<svg ...>) are also accepted.
+      icon: "table"
       # hash: "#/gw-access-map"   ← auto-derived from id
       api_src: "/gw/plugins/access-map"
       # Leave roles empty so every authenticated user can check their own access.
       roles: []
 
-  # ── Example: embed a Grafana dashboard for admins only ──────────────────────
+  # ── Example: embed a Grafana dashboard for admins only ─────────────────────────────────
   # plugins:
   #   - id: monitoring
   #     label: "Monitoring"
-  #     icon: "📊"
+  #     icon: "table"
   #     iframe_src: "https://grafana.example.com/d/xyz?kiosk"
   #     roles: [ROOT_ADMIN, ADMIN]
