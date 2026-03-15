@@ -1,0 +1,138 @@
+# OIDC-to-CloudStack Auto-Provisioning Middleware
+# Example configuration file — copy to config.yaml and edit.
+# Env-var interpolation: ${VAR_NAME} or ${VAR_NAME:default_value}
+
+cloudstack:
+  # Base URL for the CloudStack API (must NOT include /client/api)
+  api_url: "${CS_API_URL:https://cloudstack.example.com/client/api}"
+  # Root admin API key / secret for provisioning calls
+  api_key: "${CS_API_KEY}"
+  secret_key: "${CS_SECRET_KEY}"
+  verify_ssl: true
+  # All OIDC-mapped objects will live under this domain path
+  # Timeout in seconds for CloudStack API calls
+  timeout: 30
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  # Full URL of the CloudStack management server to proxy traffic to
+  upstream_url: "${CS_UPSTREAM_URL:https://cloudstack.example.com}"
+  log_level: "${LOG_LEVEL:INFO}"
+
+cache:
+  # "memory" or "redis"
+  type: "memory"
+  # Only used when type = "redis"
+  redis_url: "${REDIS_URL:redis://localhost:6379/0}"
+  # Seconds before a cached provisioning result is considered stale
+  ttl: 300
+
+oidc:
+  # OIDC provider discovery URL (e.g. https://accounts.google.com,
+  # https://keycloak.example.com/realms/myrealm,
+  # https://login.microsoftonline.com/<tenant>/v2.0)
+  issuer_url: "${OIDC_ISSUER_URL}"
+  # OAuth2 client credentials (registered in your IdP)
+  client_id: "${OIDC_CLIENT_ID}"
+  client_secret: "${OIDC_CLIENT_SECRET}"
+  # Must match the redirect URI registered in your IdP
+  redirect_uri: "${OIDC_REDIRECT_URI:https://cloudstack-gw.example.com/auth/callback}"
+  # JWT claim containing the list of group names
+  groups_claim: "${OIDC_GROUPS_CLAIM:groups}"
+  # OIDC scopes to request
+  scopes: ["openid", "email", "profile", "groups"]
+  # Random secret for signing session cookies (generate: openssl rand -hex 32)
+  session_secret: "${OIDC_SESSION_SECRET}"
+  session_cookie_name: "oidcgw_session"
+  # Seconds before the session cookie expires
+  session_ttl: 3600
+  verify_ssl: true
+
+# Group-based access control
+# -------------------------
+# Create Entra ID / Okta App Roles (or LDAP groups) matching these patterns:
+#
+#   CS_ROOT_ADMIN          → Global CloudStack administrator
+#   CS_ROOT_OPERATIONS     → Global operator (most commands, no destructive deletes)
+#   CS_ROOT_READONLY       → Global read-only (list*/get*/query* only)
+#   CS_<DOMAIN>_ADMIN      → Administrator of the named CloudStack domain
+#   CS_<DOMAIN>_OPERATIONS → Operator of the named domain
+#   CS_<DOMAIN>_READONLY   → Read-only access to the named domain
+#   CS_<DOMAIN>_PRJ_<KEY>_USER → Project member in the named domain
+#
+# Domain names must use hyphens (not underscores), e.g. CS_MY-ORG_ADMIN.
+# The middleware creates two shared CloudStack accounts per domain:
+#   oidc-admin  (for ADMIN/OPERATIONS/READONLY users)
+#   oidc-user   (for project-only users)
+# All real permission enforcement happens in the proxy tier.
+
+reconciliation:
+  enabled: true
+  # Seconds between background reconciliation runs
+  interval: 3600
+  # Set users to Disabled state if their account no longer matches any IdP group
+  disable_orphaned_users: true
+  # Remove accounts that have no users (use with caution)
+  cleanup_empty_accounts: false
+
+ui:
+  # ── Command filtering ────────────────────────────────────────────────────────
+  # Strip named CS API commands from the listApis response for users of each
+  # role type.  The SPA will not render action buttons for commands it doesn't
+  # know about, so this is a UI-level complement to the proxy-tier 403 check.
+  #
+  # Role-type keys: ROOT_ADMIN | ADMIN | OPERATIONS | READONLY | USER
+  #
+  # hide_commands:
+  #   READONLY:
+  #     - deployVirtualMachine
+  #     - destroyVirtualMachine
+  #     - stopVirtualMachine
+  #     - rebootVirtualMachine
+  #     - createVolume
+  #     - deleteVolume
+  #     - createNetwork
+  #     - deleteNetwork
+  #   USER:
+  #     - deployVirtualMachine
+
+  # ── CSS selector hiding ──────────────────────────────────────────────────────
+  # CSS selectors to force-hide via injected <style> for users of each role.
+  # Useful for UI chrome not tied to a single API command (e.g. nav menu items,
+  # offering management, tabs on detail pages).
+  #
+  # hide_selectors:
+  #   READONLY:
+  #     - ".action-button[data-action='edit']"
+  #     - "li.ant-menu-item[data-route^='/offering']"
+
+  # ── Plugin pages ─────────────────────────────────────────────────────────────
+  # Custom pages injected into the CloudStack SPA sidebar.  Each plugin is
+  # rendered in a full-page overlay when its hash is active.
+  #
+  # Rendering options (use exactly one):
+  #   api_src   — fetch JSON from a gateway endpoint and render as a searchable
+  #               table (built-in renderer; used by the Access Map below)
+  #   iframe_src — embed an external URL as a full-height iframe
+  #   html       — inject raw HTML / inline scripts into the overlay div
+  #
+  # roles: list of role types that can see this plugin; empty = all roles.
+  # hash: defaults to "#/gw-<id>" when omitted.
+  #
+  plugins:
+    - id: access-map
+      label: "Access Map"
+      icon: "🗂️"
+      # hash: "#/gw-access-map"   ← auto-derived from id
+      api_src: "/gw/plugins/access-map"
+      # Leave roles empty so every authenticated user can check their own access.
+      roles: []
+
+  # ── Example: embed a Grafana dashboard for admins only ──────────────────────
+  # plugins:
+  #   - id: monitoring
+  #     label: "Monitoring"
+  #     icon: "📊"
+  #     iframe_src: "https://grafana.example.com/d/xyz?kiosk"
+  #     roles: [ROOT_ADMIN, ADMIN]
