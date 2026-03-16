@@ -655,6 +655,29 @@ _PLUGIN_JS_TMPL = """\
             }).join('') + '</div>');
     }
   }
+  /* Expose a hook so the footer bar script (_initUser) can inject plugin
+   * shortcuts into the user dropdown without needing access to PLUGINS,
+   * which is a closure-local variable inside this IIFE.           */
+  window._gwAddPluginsToMenu = function() {
+    var dp = document.getElementById('gw-user-drop');
+    var pr = document.getElementById('gw-mi-profile');
+    if (!dp || !pr) return;
+    PLUGINS.forEach(function(pg) {
+      var it = document.createElement('div');
+      it.className = 'gw-di';
+      it.innerHTML = '<span style="margin-right:6px;line-height:1;display:inline-block">' + pg.icon + '</span>' + _E(pg.label);
+      it.addEventListener('click', function() {
+        document.querySelectorAll('.gw-drop.gw-open').forEach(function(d) { d.classList.remove('gw-open'); });
+        window.location.hash = pg.hash;
+      });
+      dp.insertBefore(it, pr);
+    });
+    if (PLUGINS.length) {
+      var sep = document.createElement('div');
+      sep.className = 'gw-dsep';
+      dp.insertBefore(sep, pr);
+    }
+  };
 })();
 </script>"""
 
@@ -1043,24 +1066,10 @@ html {{ scroll-padding-top: 64px; }}
 
   /* 1c. User info + dropdown */
   function _initUser() {{
-    /* ── Plugin shortcuts in user drop-down ── */
-    var _dp = document.getElementById('gw-user-drop');
-    var _pr = document.getElementById('gw-mi-profile');
-    if (PLUGINS.length && _dp && _pr) {{
-      PLUGINS.forEach(function(pg) {{
-        var it = document.createElement('div');
-        it.className = 'gw-di';
-        it.innerHTML = '<span style="margin-right:6px;line-height:1;">' + pg.icon
-          + '</span>' + _E(pg.label);
-        it.addEventListener('click', function() {{
-          _closeDrops(); window.location.hash = pg.hash;
-        }});
-        _dp.insertBefore(it, _pr);
-      }});
-      var _sep = document.createElement('div');
-      _sep.className = 'gw-dsep';
-      _dp.insertBefore(_sep, _pr);
-    }}
+    /* Inject plugin shortcuts (Access Map etc.) at top of user dropdown.
+     * window._gwAddPluginsToMenu is set by the plugin overlay IIFE which
+     * has access to the PLUGINS array; we just call the hook here.   */
+    if (typeof window._gwAddPluginsToMenu === 'function') window._gwAddPluginsToMenu();
     var info     = _store.getters.userInfo || {{}};
     var avatarEl = document.getElementById('gw-avatar');
     var nameEl   = document.getElementById('gw-username');
