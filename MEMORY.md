@@ -1,15 +1,17 @@
 # cloudstack-gw — Session Memory File
-> Last updated: 2026-02-28 — written after workstation crash recovery
+> Last updated: 2026-03-15
 
 ---
 
 ## Current project state
 
-**Status: COMPLETE and FUNCTIONAL.**
+**Status: FUNCTIONAL — deployed locally, git repo live on GitHub.**
+
 - All 156 unit tests pass (`pytest tests/ -v`).
-- No git repository has been initialised yet — the next action is `git init && git push`.
-- The `cloudstack/` directory in the workspace is the upstream Apache CloudStack source tree used only for reference; it is never modified.
-- `.gitignore` already excludes `config.yaml`, `.env.local`, `__pycache__/`, `*.pyc`, `.pytest_cache/`, `*.egg-info/`, `dist/`, `.venv/`.
+- GitHub repo: `https://github.com/rgjrt1/cloudstack-gw` (`main` branch, latest commit `c352a3f`).
+- Running locally at `http://127.0.0.1:9999` (port set via `.env.local`).
+- `.gitignore` excludes `config.yaml`, `.env.local`, `__pycache__/`, `*.pyc`, `.pytest_cache/`, `*.egg-info/`, `dist/`, `.venv/`.
+- `cloudstack/` in the workspace root is the upstream Apache CloudStack source — reference only, never modified.
 
 ---
 
@@ -18,34 +20,85 @@
 A **standalone OIDC-to-CloudStack reverse proxy / gateway**.
 
 ```
-Browser → cloudstack-gw (:8080) → CloudStack API / UI
+Browser → cloudstack-gw (:9999 dev / :8080 prod) → CloudStack API / UI
 ```
 
-- **No oauth2-proxy involved.** The gateway IS the OIDC relying party.
+- **No oauth2-proxy.** The gateway IS the OIDC relying party.
 - It implements the full Authorization Code flow itself (`src/oidc_auth.py`).
-- It auto-provisions CloudStack objects on first login, then proxies traffic transparently.
-- Users authenticate once; the browser gets a signed `oidcgw_session` cookie plus real CloudStack JSESSIONID / sessionkey / userid cookies so the Vue SPA works without modification.
+- Auto-provisions CloudStack objects on first login, then proxies traffic transparently.
+- Users authenticate once; the browser gets a signed `oidcgw_session` cookie plus real CloudStack `JSESSIONID` / `sessionkey` / `userid` cookies so the Vue SPA works without modification.
+- Injects a custom header bar + plugin overlay system into every CloudStack SPA page.
 
 ---
 
-## Major migration completed just before the crash
+## Major migration (completed 2026-02)
 
-We **replaced the old `group_mappings` config model** with a **convention-based `CS_*` group naming scheme**.
+Replaced the old `group_mappings` config model with a **convention-based `CS_*` group naming scheme**.
 
-### Old approach (removed)
-- `config.yaml` had an explicit `group_mappings:` list with `group`, `priority`, `role_type`, `permissions` per entry.
-- `AppConfig` had `GroupMapping` and `PermissionEntry` pydantic models.
-- The provisioner created a unique `oidc-<group-slug>` account and role per group.
-- Per-account role permissions were reconciled on every login.
+- Old: explicit `group_mappings:` list; unique `oidc-<group-slug>` account + role per group; per-account role permissions reconciled on every login.
+- New: no `group_mappings` section; two shared accounts per domain (`oidc-admin`, `oidc-user`); real enforcement is in `src/permission.py`.
 
-### New approach (current)
-- No `group_mappings` section in config.
-- Groups are parsed purely by naming convention — the `CS_*` prefix signals access.
-- Two **shared** accounts are created per CloudStack domain:
-  - `oidc-admin` (role: `oidc-admin-role`, type Admin) — for ADMIN/OPERATIONS/READONLY users
-  - `oidc-user` (role: `oidc-user-role`, type User) — for project-only users
-- Real per-user permission enforcement is in the **proxy tier** (`src/permission.py`), not in CloudStack roles.
-- `AppConfig` ignores extra keys (`model_config = ConfigDict(extra="ignore")`) so old config files with `group_mappings:` still load without error during migration.
+`AppConfig` has `model_config = ConfigDict(extra="ignore")` so old configs with `group_mappings:` still load without error.
+
+---
+
+## Injected UI bar system
+
+`_inject_footer()` in `middleware.py` injects HTML + CSS + JS before `</body>` on every proxied page.
+
+### Bar structure
+
+```
+#oidcgw-bar  (position:fixed; top:0; z-index:99999; height:64px — replaces native CS header)
+  #gw-toggle        sidebar collapse button
+  #gw-logo          CloudStack logo/text
+  #gw-proj-wrap     project selector <select> (always shown; populated via listProjects fetch)
+  [flex spacer]
+  #gw-create-wrap   "+ Create" dropdown (shown only if create-able APIs exist)
+  #gw-notify-wrap   notification bell
+  #gw-role-badge    server-rendered role badge
+  #gw-user-wrap
+    #gw-user-btn    avatar + username (click to open dropdown)
+    #gw-user-drop   user profile dropdown
+      [plugin items] ← injected by window._gwAddPluginsToMenu()
+      [separator]
+      #gw-mi-profile
+      #gw-mi-limits
+      [separator]
+      #gw-mi-signout
+```
+
+The native `.ant-layout-header` is hidden via `visibility:hidden` (keeps its layout dimensions).
+
+### Plugin overlay system (`_PLUGIN_JS_TMPL`)
+
+A separate `<script>` block injected **only when plugins are configured** (`visible_plugins` non-empty). It is a **plain Python string** (not f-string) — JS curly braces need no escaping.
+
+```
+#gw-plugin-ov  (position:fixed; top:64px; bottom:0; right:0; z-index:9000)
+```
+
+- `PLUGINS` — IIFE-local `var` populated from `/*PLUGINS_JSON*/` placeholder replaced at render time via `str.replace()`.
+- `_onHash()` — called on `hashchange`, `popstate`, and a 300 ms `setInterval` poll (covers Vue Router 4 navigations that use `history.pushState` without firing either event). Shows overlay if hash matches a plugin, hides it otherwise.
+- **`window._gwAddPluginsToMenu` hook** — exposed from inside the IIFE so the footer script can inject plugin shortcuts into `#gw-user-drop` without accessing the IIFE-local `PLUGINS` var. Called from `_initUser()` with a `typeof` guard.
+
+### ⚠ Critical scope boundary
+
+`_inject_footer()` is an **f-string** — all `{{` / `}}` in the source become literal `{` / `}` in output.  
+`_PLUGIN_JS_TMPL` is a **plain string** — JS braces are already literal.  
+**Never reference `PLUGINS` (or any `_PLUGIN_JS_TMPL`-local variable) from the footer f-string.** Use the `window._gwAddPluginsToMenu` hook pattern instead.
+
+### Icons
+
+`ui.plugins[*].icon` can be a named key or raw SVG. Named keys (e.g. `"table"`) are resolved via `_ICON_SVG_MAP` dict in `middleware.py` to AntD-compatible monochrome SVG paths.
+
+### Project selector
+
+- Always shown — no API-availability gate.
+- `_initProject()` fetches `listProjects` with the sessionkey from `localStorage.getItem('primate__Access-Token')`.
+- Server-side intercept in `proxy_request` catches `command=listProjects`:
+  - Admins → `cs_client.list_projects()` (all projects).
+  - Project-only users → loops over `provisioned.project_ids`.
 
 ---
 
@@ -113,17 +166,17 @@ When Entra ID emits group Object IDs (GUIDs) instead of display names, set `oidc
 
 | File | Lines | Responsibility |
 |---|---|---|
-| `src/main.py` | 78 | Uvicorn entry point; wires config → dependencies → `build_app()` |
-| `src/middleware.py` | 622 | FastAPI app, OIDC routes, proxy catch-all, CS session creation |
-| `src/oidc_auth.py` | 349 | Authorization Code flow, JWKS validation, session cookie sign/verify |
-| `src/provisioner.py` | 411 | Idempotent CS object creation (domains, accounts, users, projects) |
-| `src/permission.py` | ~100 | Proxy-tier ACL — all real access control |
-| `src/group_parser.py` | 153 | `CS_*` group name → `ParsedGroups` |
-| `src/cloudstack_client.py` | 524 | Async CS API client with HMAC-SHA1 signing |
-| `src/cache.py` | 167 | `MemoryCache` / `RedisCache` with TTL |
-| `src/reconciler.py` | 270 | Background loop; disables orphaned users, cleans empty accounts |
-| `src/models.py` | 170 | Pydantic v2 config + domain models; `slugify()` |
-| `src/graph_client.py` | 187 | Microsoft Graph client: GUID→displayName, groups overage |
+| `src/main.py` | 69 | Uvicorn entry point; wires config → dependencies → `build_app()` |
+| `src/middleware.py` | 2409 | FastAPI app, OIDC routes, proxy catch-all, CS session creation, injected UI bar |
+| `src/oidc_auth.py` | 354 | Authorization Code flow, JWKS validation, session cookie sign/verify |
+| `src/provisioner.py` | 431 | Idempotent CS object creation (domains, accounts, users, projects) |
+| `src/permission.py` | 121 | Proxy-tier ACL — all real access control |
+| `src/group_parser.py` | 152 | `CS_*` group name → `ParsedGroups` |
+| `src/cloudstack_client.py` | 541 | Async CS API client with HMAC-SHA1 signing |
+| `src/cache.py` | 166 | `MemoryCache` / `RedisCache` with TTL |
+| `src/reconciler.py` | 269 | Background loop; disables orphaned users, cleans empty accounts |
+| `src/models.py` | 224 | Pydantic v2 config + domain models; `slugify()` |
+| `src/graph_client.py` | 186 | Microsoft Graph client: GUID→displayName, groups overage |
 | `src/config.py` | 68 | YAML loader with `${ENV_VAR:default}` interpolation |
 
 ---
@@ -152,7 +205,7 @@ cloudstack:
   api_url: "..."          # CS API endpoint
   api_key: "..."          # Root admin API key (for provisioning)
   secret_key: "..."
-  domain_path: "/oidc"    # All OIDC objects live under this path
+  domain_path: ""          # empty = ROOT domain; set to e.g. "/oidc" for a sub-domain
   verify_ssl: true
   timeout: 30
 
@@ -182,6 +235,13 @@ reconciliation:
   interval: 3600
   disable_orphaned_users: true
   cleanup_empty_accounts: false
+
+ui:
+  plugins:
+    - id: "access-map"
+      label: "Access Map"
+      icon: "table"       # named icon (resolved via _ICON_SVG_MAP) or raw SVG
+      api_src: "/auth/me" # renders a JSON table; or use iframe_src / html
 ```
 Env-var interpolation: `${VAR_NAME}` and `${VAR_NAME:default}` anywhere in the file.
 
@@ -233,17 +293,7 @@ The `docker-compose.yml` **no longer has an oauth2-proxy service** — that was 
 
 ## Next steps / TODOs
 
-1. **Initialise git and push.**
-   ```bash
-   cd cloudstack-gw
-   git init
-   git add .
-   git commit -m "feat: standalone OIDC gateway, CS_* group model, 156 tests passing"
-   git remote add origin <your-remote>
-   git push -u origin main
-   ```
-
-2. **Add `authlib` to `requirements.txt`** for production JWT signature verification:
+1. **Add `authlib` to `requirements.txt`** for production JWT signature verification:
    ```
    authlib>=1.3.0
    ```
@@ -298,7 +348,9 @@ cloudstack-gw/
   pytest.ini
   requirements.txt
   README.md
-  MEMORY.md             # this file
+  MEMORY.md
   smoke_test.py
-  get_cs_keys.py        # helper: fetch root admin API keys from CS
+  get_cs_keys.py
+  gen_role_matrix.py
+  CLOUDSTACK_ROLE_MATRIX.md
 ```
